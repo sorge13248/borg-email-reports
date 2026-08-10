@@ -1,0 +1,16 @@
+services:
+  borg-email-reports:
+    build:
+      context: .
+      target: dev
+    env_file:
+      - .env
+    environment:
+      - RUN_ON_STARTUP=true
+      - CONFIG_PATH=/app/config/config.json
+    volumes:
+      - ./src:/app/src:ro
+      - ./config.json:/app/config/config.json:ro
+      # Add your Borg repo mounts here (one per line):
+      # - /host/path/repo-name:/home/app/repo-name
+      - /mnt/shd-oci-001-sshfs/mnt/owl-storage/shd-oci-001/backup/base-system:/home/app/shd-oci-001__base-system

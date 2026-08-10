@@ -1,0 +1,13 @@
+{
+  "schedule": "0 8 * * *",
+  "email": {
+    "recipients": [
+      "admin@example.com",
+      "ops@example.com"
+    ],
+    "repoRecipients": {
+      "my-repo": ["owner@example.com"],
+      "other-repo": ["other@example.com", "manager@example.com"]
+    }
+  }
+}
