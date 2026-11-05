@@ -147,6 +147,6 @@ config.example.json
 ## CI/CD
 
 - **`.github/workflows/docker-multiarch.yml`**: Builds and pushes multi-architecture Docker images (`linux/amd64` via `ubuntu-latest`, `linux/arm64` natively via `ubuntu-24.04-arm`) to GHCR using a digest-based merge pipeline. Triggered automatically on version tags (`v*`), PRs to `main` (build test), or manually via `workflow_dispatch`.
-- **`.github/workflows/release.yml`**: Automated release pipeline triggered manually via `workflow_dispatch`. Calculates the new semver version, updates `package.json` / `package-lock.json`, commits and merges changes, generates release notes from commits, creates a GitHub Release, and initiates the multi-arch Docker publish pipeline.
+- **`.github/workflows/release.yml`**: Automated release pipeline triggered manually via `workflow_dispatch`. Reads from `main`, calculates the new semver version, updates `package.json` / `package-lock.json`, commits and pushes to `main`, generates a changelog from commit history, creates the tag and GitHub Release, and initiates the multi-arch Docker publish pipeline.
 
 Images are published to GHCR as: `ghcr.io/<owner>/<repo>:<tag>` and `:latest`.

@@ -42,27 +42,18 @@ jobs:
             exit 1
           fi
 
-      - name: Checkout repository
+      - name: Checkout main
         uses: actions/checkout@v4
         with:
+          ref: main
           fetch-depth: 0
           token: ${{ secrets.RELEASE_PAT || secrets.GITHUB_TOKEN }}
 
-      - name: Configura Git e rileva branch
-        id: git_setup
+      - name: Configura Git
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-
-          if git ls-remote --exit-code --heads origin develop; then
-            echo "Branch develop trovato su origin. Flusso: develop -> main."
-            git checkout -B develop origin/develop
-            echo "has_develop=true" >> $GITHUB_OUTPUT
-          else
-            echo "Branch develop non trovato su origin. Flusso: diretto su main."
-            git checkout -B main origin/main
-            echo "has_develop=false" >> $GITHUB_OUTPUT
-          fi
+          git checkout -B main origin/main
 
       - name: Calcola nuova versione e aggiorna package.json
         id: versioning
@@ -75,7 +66,6 @@ jobs:
           bump_type = """${{ github.event.inputs.bump_type }}""".strip()
           custom_ver = """${{ github.event.inputs.custom_version }}""".strip().lstrip("v")
 
-          # Leggi versione attuale dal package.json di root
           with open("package.json", "r", encoding="utf-8") as f:
               root_pkg = json.load(f)
           current_ver = root_pkg.get("version", "0.0.0")
@@ -139,32 +129,26 @@ jobs:
                   f.write(f"tag_name=v{new_ver}\n")
           EOF
 
-      - name: Commit e push su branch di lavoro
+      - name: Commit e push su main
         run: |
           NEW_VER="${{ steps.versioning.outputs.new_version }}"
           git add package.json package-lock.json
           
           if git diff --staged --quiet; then
-            echo "Nessuna modifica da committare."
+            echo "Nessuna modifica da committare su main."
           else
             git commit -m "chore(release): bump version to v${NEW_VER}"
-            if [ "${{ steps.git_setup.outputs.has_develop }}" = "true" ]; then
-              git push origin develop
-            else
-              git push origin main
-            fi
+            git push origin main
           fi
 
-      - name: Merge develop in main e push
-        if: steps.git_setup.outputs.has_develop == 'true'
+      - name: Crea e pusha tag Git
         run: |
-          NEW_VER="${{ steps.versioning.outputs.new_version }}"
-          git checkout -B main origin/main
-          git pull origin main
-          git merge develop --no-ff -m "chore(release): merge develop into main for v${NEW_VER}"
-          git push origin main
+          TAG_NAME="${{ steps.versioning.outputs.tag_name }}"
+          echo "Creazione tag ${TAG_NAME} su main..."
+          git tag -a "${TAG_NAME}" -m "Release ${TAG_NAME}"
+          git push origin "${TAG_NAME}"
 
-      - name: Crea GitHub Release
+      - name: Genera note di rilascio e crea GitHub Release
         id: create_release
         env:
           GH_TOKEN: ${{ secrets.RELEASE_PAT || secrets.GITHUB_TOKEN }}
@@ -186,7 +170,6 @@ jobs:
           repo = os.getenv("REPO", "").strip()
           token = os.getenv("GH_TOKEN", "").strip()
 
-          # Determina il range di commit
           if prev_tag and subprocess.run(["git", "rev-parse", "-q", "--verify", f"refs/tags/{prev_tag}"], capture_output=True).returncode == 0:
               commit_range = f"{prev_tag}..HEAD"
               changelog_link = f"https://github.com/{repo}/compare/{prev_tag}...{tag_name}"
@@ -202,7 +185,6 @@ jobs:
           res = subprocess.run(cmd, capture_output=True, text=True)
           raw_commits = res.stdout.strip().split("\n") if res.stdout.strip() else []
 
-          # Tenta di interrogare la GitHub API per ottenere il mapping SHA -> username GitHub reale
           author_map = {}
           if token and repo:
               try:
@@ -232,10 +214,6 @@ jobs:
                   continue
               full_sha, short_sha, email, name, subject = parts[0], parts[1], parts[2], parts[3], parts[4]
 
-              # Risoluzione dello username:
-              # 1. Login ottenuto direttamente dalla GitHub API
-              # 2. Match sull'email GitHub noreply (es. 12345+username@users.noreply.github.com)
-              # 3. Fallback sul nome Git senza '@' (per non taggare profili GitHub errati)
               gh_user = author_map.get(full_sha)
               if not gh_user:
                   m = re.match(r"^(?:[0-9]+\+)?([^@]+)@users\.noreply\.github\.com$", email)
@@ -263,7 +241,6 @@ jobs:
           
           echo "Creazione GitHub Release per ${TAG_NAME} su main..."
           gh release create "${TAG_NAME}" \
-            --target main \
             --title "${TAG_NAME}" \
             --notes-file release_notes.md
           
@@ -293,8 +270,7 @@ jobs:
           * **Versione precedente:** `${{ steps.versioning.outputs.previous_version }}`
           * **Nuova versione:** `${{ steps.versioning.outputs.new_version }}`
           * **Tag creato:** `${{ steps.versioning.outputs.tag_name }}`
-          * **Branch aggiornati:** ${{ steps.git_setup.outputs.has_develop == 'true' && '`develop` e `main`' || '`main`' }}
-          * **Release GitHub:** Creata con note automatiche generate dalle PR/commit
+          * **Branch:** `main`
+          * **Release GitHub:** Creata con changelog automatico generato dai commit
           * **Pipeline di publish:** Avviata per la build Docker multi-arch (amd64 / arm64) su GHCR
           EOF
-
