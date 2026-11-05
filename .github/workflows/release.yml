@@ -18,15 +18,22 @@ on:
         required: false
         default: ''
         type: string
+  pull_request:
+    types:
+      - closed
+    branches:
+      - main
 
 permissions:
   contents: write
   packages: write
   actions: write
+  pull-requests: write
 
 jobs:
-  release:
-    name: Release & Publish Trigger
+  prepare-release:
+    name: Prepare Release & Create Merge Request
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
 
     steps:
@@ -55,11 +62,11 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
           if git ls-remote --exit-code --heads origin develop; then
-            echo "Branch develop trovato su origin. Flusso: develop -> main."
+            echo "Branch develop trovato su origin. Base di partenza: develop."
             git checkout -B develop origin/develop
             echo "has_develop=true" >> $GITHUB_OUTPUT
           else
-            echo "Branch develop non trovato su origin. Flusso: diretto su main."
+            echo "Branch develop non trovato su origin. Base di partenza: main."
             git checkout -B main origin/main
             echo "has_develop=false" >> $GITHUB_OUTPUT
           fi
@@ -75,7 +82,6 @@ jobs:
           bump_type = """${{ github.event.inputs.bump_type }}""".strip()
           custom_ver = """${{ github.event.inputs.custom_version }}""".strip().lstrip("v")
 
-          # Leggi versione attuale dal package.json di root
           with open("package.json", "r", encoding="utf-8") as f:
               root_pkg = json.load(f)
           current_ver = root_pkg.get("version", "0.0.0")
@@ -140,32 +146,36 @@ jobs:
           EOF
 
       - name: Commit e push su branch di lavoro
+        id: commit_push
         run: |
           NEW_VER="${{ steps.versioning.outputs.new_version }}"
-          git add package.json package-lock.json
+          HAS_DEVELOP="${{ steps.git_setup.outputs.has_develop }}"
           
-          if git diff --staged --quiet; then
-            echo "Nessuna modifica da committare."
-          else
-            git commit -m "chore(release): bump version to v${NEW_VER}"
-            if [ "${{ steps.git_setup.outputs.has_develop }}" = "true" ]; then
-              git push origin develop
+          if [ "$HAS_DEVELOP" = "true" ]; then
+            HEAD_BRANCH="develop"
+            git add package.json package-lock.json
+            if git diff --staged --quiet; then
+              echo "Nessuna modifica da committare su develop."
             else
-              git push origin main
+              git commit -m "chore(release): bump version to v${NEW_VER}"
+              git push origin develop
+            fi
+          else
+            HEAD_BRANCH="release/v${NEW_VER}"
+            git checkout -b "${HEAD_BRANCH}"
+            git add package.json package-lock.json
+            if git diff --staged --quiet; then
+              echo "Nessuna modifica da committare su ${HEAD_BRANCH}."
+            else
+              git commit -m "chore(release): bump version to v${NEW_VER}"
+              git push -u origin "${HEAD_BRANCH}"
             fi
           fi
 
-      - name: Merge develop in main e push
-        if: steps.git_setup.outputs.has_develop == 'true'
-        run: |
-          NEW_VER="${{ steps.versioning.outputs.new_version }}"
-          git checkout -B main origin/main
-          git pull origin main
-          git merge develop --no-ff -m "chore(release): merge develop into main for v${NEW_VER}"
-          git push origin main
+          echo "head_branch=${HEAD_BRANCH}" >> $GITHUB_OUTPUT
 
-      - name: Crea GitHub Release
-        id: create_release
+      - name: Genera note di rilascio
+        id: release_notes
         env:
           GH_TOKEN: ${{ secrets.RELEASE_PAT || secrets.GITHUB_TOKEN }}
           PREV_TAG: "v${{ steps.versioning.outputs.previous_version }}"
@@ -186,7 +196,6 @@ jobs:
           repo = os.getenv("REPO", "").strip()
           token = os.getenv("GH_TOKEN", "").strip()
 
-          # Determina il range di commit
           if prev_tag and subprocess.run(["git", "rev-parse", "-q", "--verify", f"refs/tags/{prev_tag}"], capture_output=True).returncode == 0:
               commit_range = f"{prev_tag}..HEAD"
               changelog_link = f"https://github.com/{repo}/compare/{prev_tag}...{tag_name}"
@@ -202,11 +211,10 @@ jobs:
           res = subprocess.run(cmd, capture_output=True, text=True)
           raw_commits = res.stdout.strip().split("\n") if res.stdout.strip() else []
 
-          # Tenta di interrogare la GitHub API per ottenere il mapping SHA -> username GitHub reale
           author_map = {}
           if token and repo:
               try:
-                  api_url = f"https://api.github.com/repos/{repo}/compare/{prev_tag}...main" if (prev_tag and commit_range != "HEAD") else f"https://api.github.com/repos/{repo}/commits?sha=main"
+                  api_url = f"https://api.github.com/repos/{repo}/compare/{prev_tag}...HEAD" if (prev_tag and commit_range != "HEAD") else f"https://api.github.com/repos/{repo}/commits?sha=HEAD"
                   req = urllib.request.Request(api_url, headers={
                       "Authorization": f"Bearer {token}",
                       "Accept": "application/vnd.github+json",
@@ -232,10 +240,6 @@ jobs:
                   continue
               full_sha, short_sha, email, name, subject = parts[0], parts[1], parts[2], parts[3], parts[4]
 
-              # Risoluzione dello username:
-              # 1. Login ottenuto direttamente dalla GitHub API
-              # 2. Match sull'email GitHub noreply (es. 12345+username@users.noreply.github.com)
-              # 3. Fallback sul nome Git senza '@' (per non taggare profili GitHub errati)
               gh_user = author_map.get(full_sha)
               if not gh_user:
                   m = re.match(r"^(?:[0-9]+\+)?([^@]+)@users\.noreply\.github\.com$", email)
@@ -260,41 +264,131 @@ jobs:
 
           print(f"Generate note di rilascio con {len(lines)} commit.")
           EOF
-          
-          echo "Creazione GitHub Release per ${TAG_NAME} su main..."
-          gh release create "${TAG_NAME}" \
-            --target main \
-            --title "${TAG_NAME}" \
-            --notes-file release_notes.md
-          
-          echo "Release ${TAG_NAME} creata con successo."
 
-      - name: Avvia pipeline di publish (docker-multiarch)
+      - name: Crea Merge Request (Pull Request) verso main
+        id: create_pr
         env:
           GH_TOKEN: ${{ secrets.RELEASE_PAT || secrets.GITHUB_TOKEN }}
+          HEAD_BRANCH: ${{ steps.commit_push.outputs.head_branch }}
+          NEW_VER: ${{ steps.versioning.outputs.new_version }}
         run: |
-          TAG_NAME="${{ steps.versioning.outputs.tag_name }}"
-          echo "Avvio della pipeline di publish Docker per il tag ${TAG_NAME}..."
+          echo "Verifica presenza di una Pull Request aperta da ${HEAD_BRANCH} verso main..."
+          EXISTING_PR=$(gh pr list --base main --head "${HEAD_BRANCH}" --state open --json number --jq '.[0].number')
           
-          if [ -n "${{ secrets.RELEASE_PAT }}" ]; then
-            echo "Release e tag creati con RELEASE_PAT."
-            echo "GitHub Actions avvierà automaticamente docker-multiarch tramite l'evento tag."
+          if [ -n "$EXISTING_PR" ]; then
+            echo "Aggiornamento Pull Request esistente #${EXISTING_PR}..."
+            gh pr edit "$EXISTING_PR" \
+              --title "chore(release): bump version to v${NEW_VER}" \
+              --body-file release_notes.md
+            PR_URL=$(gh pr view "$EXISTING_PR" --json url --jq '.url')
           else
-            echo "Release e tag creati con GITHUB_TOKEN standard."
-            echo "Avvio esplicito di docker-multiarch via workflow_dispatch..."
-            gh workflow run docker-multiarch.yml --ref "${TAG_NAME}"
+            echo "Creazione nuova Pull Request verso main..."
+            PR_URL=$(gh pr create \
+              --base main \
+              --head "${HEAD_BRANCH}" \
+              --title "chore(release): bump version to v${NEW_VER}" \
+              --body-file release_notes.md)
           fi
+
+          echo "pr_url=${PR_URL}" >> $GITHUB_OUTPUT
+          echo "Pull Request pronta: ${PR_URL}"
 
       - name: Summary del rilascio
         run: |
           cat << 'EOF' >> $GITHUB_STEP_SUMMARY
-          ## 🚀 Rilascio completato con successo!
+          ## 🔀 Merge Request di rilascio creata con successo!
           
           * **Versione precedente:** `${{ steps.versioning.outputs.previous_version }}`
-          * **Nuova versione:** `${{ steps.versioning.outputs.new_version }}`
-          * **Tag creato:** `${{ steps.versioning.outputs.tag_name }}`
-          * **Branch aggiornati:** ${{ steps.git_setup.outputs.has_develop == 'true' && '`develop` e `main`' || '`main`' }}
-          * **Release GitHub:** Creata con note automatiche generate dalle PR/commit
-          * **Pipeline di publish:** Avviata per la build Docker multi-arch (amd64 / arm64) su GHCR
+          * **Nuova versione proposta:** `${{ steps.versioning.outputs.new_version }}`
+          * **Branch sorgente:** `${{ steps.commit_push.outputs.head_branch }}`
+          * **Branch destinazione:** `main`
+          * **Merge Request (PR):** [Apri la Pull Request](${{ steps.create_pr.outputs.pr_url }})
+          
+          > ℹ️ Una volta revisionata e completata la merge su `main`, la pipeline di pubblicazione completerà automaticamente il rilascio (creazione del tag Git, GitHub Release e build Docker multi-arch su GHCR).
           EOF
 
+  publish-release:
+    name: Publish Release & Trigger Build
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request' && github.event.pull_request.merged == true && startsWith(github.event.pull_request.title, 'chore(release):')
+    permissions:
+      contents: write
+      packages: write
+      actions: write
+
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+          token: ${{ secrets.RELEASE_PAT || secrets.GITHUB_TOKEN }}
+
+      - name: Configura Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Estrai versione
+        id: release_info
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          TAG_NAME="v${VERSION}"
+          echo "version=${VERSION}" >> $GITHUB_OUTPUT
+          echo "tag_name=${TAG_NAME}" >> $GITHUB_OUTPUT
+          echo "Versione target: ${VERSION} (${TAG_NAME})"
+
+      - name: Crea Git Tag e GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_PAT || secrets.GITHUB_TOKEN }}
+          TAG_NAME: ${{ steps.release_info.outputs.tag_name }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          printf "%s\n" "$PR_BODY" > release_notes.md
+          if [ ! -s release_notes.md ]; then
+            echo "Release ${TAG_NAME}" > release_notes.md
+          fi
+
+          if git rev-parse -q --verify "refs/tags/${TAG_NAME}" >/dev/null; then
+            echo "Il tag ${TAG_NAME} esiste già localmente/remotamente."
+          else
+            echo "Creazione tag ${TAG_NAME} su main..."
+            git tag -a "${TAG_NAME}" -m "Release ${TAG_NAME}"
+            git push origin "${TAG_NAME}"
+          fi
+
+          if gh release view "${TAG_NAME}" >/dev/null 2>&1; then
+            echo "La release ${TAG_NAME} esiste già su GitHub."
+          else
+            echo "Creazione GitHub Release per ${TAG_NAME}..."
+            gh release create "${TAG_NAME}" \
+              --target main \
+              --title "${TAG_NAME}" \
+              --notes-file release_notes.md
+          fi
+
+      - name: Avvia pipeline di publish (docker-multiarch)
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_PAT || secrets.GITHUB_TOKEN }}
+          TAG_NAME: ${{ steps.release_info.outputs.tag_name }}
+        run: |
+          echo "Avvio della pipeline di publish Docker per il tag ${TAG_NAME}..."
+          
+          if [ -n "${{ secrets.RELEASE_PAT }}" ]; then
+            echo "Tag creato con RELEASE_PAT. docker-multiarch si avvierà automaticamente."
+          else
+            echo "Avvio esplicito di docker-multiarch via workflow_dispatch..."
+            gh workflow run docker-multiarch.yml --ref "${TAG_NAME}"
+          fi
+
+      - name: Summary del rilascio pubblicato
+        run: |
+          cat << 'EOF' >> $GITHUB_STEP_SUMMARY
+          ## 🚀 Rilascio pubblicato con successo!
+          
+          * **Versione pubblicata:** `${{ steps.release_info.outputs.version }}`
+          * **Tag creato:** `${{ steps.release_info.outputs.tag_name }}`
+          * **Branch:** `main`
+          * **Merge Request originaria:** #${{ github.event.pull_request.number }}
+          * **Pipeline di publish:** Avviata per la build Docker multi-arch (amd64 / arm64) su GHCR
+          EOF
