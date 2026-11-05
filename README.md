@@ -1,3 +1,5 @@
+![Borg Backup HTML Email Report Preview](./assets/thunderbird-email-mockup-backdrop.png)
+
 # borg-email-reports
 
 Batch TypeScript/Node.js application that monitors multiple [BorgBackup](https://borgbackup.readthedocs.io/) repositories and sends formatted HTML email reports via SMTP on a configurable cron schedule.
