@@ -1,7 +1,7 @@
 # CLAUDE.md
 
 ## Project
-TypeScript Node.js batch app — monitors BorgBackup repositories and sends HTML email reports on a cron schedule. Runs inside Docker (Alpine, non-root user `app`, UID 1001).
+TypeScript Node.js batch app — monitors BorgBackup repositories and sends HTML email reports on a cron schedule. Runs inside Docker (Alpine, root user).
 
 ## Build & run commands
 ```bash
@@ -10,7 +10,7 @@ npm run build          # tsc → dist/
 npm start              # node dist/index.js
 
 docker compose up -d --build                          # produzione
-docker compose -f docker-compose.dev.yml up --build   # sviluppo (ts-node)
+docker compose -f docker-compose.dev.yml up --build   # sviluppo (tsx)
 ```
 
 ## Architecture

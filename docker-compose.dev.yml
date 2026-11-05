@@ -13,4 +13,3 @@ services:
       - ./config.json:/app/config/config.json:ro
       # Add your Borg repo mounts here (one per line):
       # - /host/path/repo-name:/home/app/repo-name
-      - /mnt/shd-oci-001-sshfs/mnt/owl-storage/shd-oci-001/backup/base-system:/home/app/shd-oci-001__base-system
